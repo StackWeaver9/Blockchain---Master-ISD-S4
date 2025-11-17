@@ -1,0 +1,15 @@
+[package]
+name = "example-counter"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+cosmwasm-std = "1.2"       # pick compatible version for your toolchain
+cw2 = "0.12"
+cw-storage-plus = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+schemars = "0.8"
+serde_json_wasm = "0.1"
