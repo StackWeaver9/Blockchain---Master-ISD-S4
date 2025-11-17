@@ -1,0 +1,184 @@
+// A simple CosmWasm counter contract in one file (src/lib.rs)
+
+use cosmwasm_std::{
+    entry_point, to_binary, Addr, Binary, Deps, DepsMut, Env, MessageInfo, Response, StdResult,
+};
+use cw2::set_contract_version;
+use cw_storage_plus::Item;
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+
+// version info for migration support
+const CONTRACT_NAME: &str = "crates.io:example-counter";
+const CONTRACT_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+// --- State ---
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
+pub struct State {
+    pub owner: Addr,
+    pub count: i64,
+}
+
+const STATE: Item<State> = Item::new("state");
+
+// --- Messages ---
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
+pub struct InstantiateMsg {
+    pub count: i64,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecuteMsg {
+    Increment {},
+    Reset { count: i64 },
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum QueryMsg {
+    GetCount {},
+}
+
+// Response structs for queries
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
+pub struct CountResponse {
+    pub count: i64,
+}
+
+// --- Instantiate ---
+#[entry_point]
+pub fn instantiate(
+    deps: DepsMut,
+    _env: Env,
+    info: MessageInfo,
+    msg: InstantiateMsg,
+) -> StdResult<Response> {
+    // set version
+    set_contract_version(deps.storage, CONTRACT_NAME, CONTRACT_VERSION)?;
+
+    let state = State {
+        owner: deps.api.addr_validate(&info.sender.to_string())?,
+        count: msg.count,
+    };
+
+    STATE.save(deps.storage, &state)?;
+
+    Ok(Response::new()
+        .add_attribute("method", "instantiate")
+        .add_attribute("owner", info.sender)
+        .add_attribute("count", state.count.to_string()))
+}
+
+// --- Execute ---
+#[entry_point]
+pub fn execute(
+    deps: DepsMut,
+    _env: Env,
+    info: MessageInfo,
+    msg: ExecuteMsg,
+) -> StdResult<Response> {
+    match msg {
+        ExecuteMsg::Increment {} => try_increment(deps, info),
+        ExecuteMsg::Reset { count } => try_reset(deps, info, count),
+    }
+}
+
+pub fn try_increment(deps: DepsMut, _info: MessageInfo) -> StdResult<Response> {
+    STATE.update(deps.storage, |mut state| -> StdResult<_> {
+        state.count = state.count.checked_add(1).ok_or_else(|| {
+            cosmwasm_std::StdError::generic_err("counter overflow when incrementing")
+        })?;
+        Ok(state)
+    })?;
+
+    let state = STATE.load(deps.storage)?;
+    Ok(Response::new()
+        .add_attribute("action", "increment")
+        .add_attribute("count", state.count.to_string()))
+}
+
+pub fn try_reset(deps: DepsMut, info: MessageInfo, count: i64) -> StdResult<Response> {
+    // only owner can reset
+    STATE.update(deps.storage, |mut state| -> StdResult<_> {
+        let sender = deps.api.addr_validate(&info.sender.to_string())?;
+        if sender != state.owner {
+            return Err(cosmwasm_std::StdError::generic_err("unauthorized"));
+        }
+        state.count = count;
+        Ok(state)
+    })?;
+
+    let state = STATE.load(deps.storage)?;
+    Ok(Response::new()
+        .add_attribute("action", "reset")
+        .add_attribute("count", state.count.to_string()))
+}
+
+// --- Query ---
+#[entry_point]
+pub fn query(deps: Deps, _env: Env, msg: QueryMsg) -> StdResult<Binary> {
+    match msg {
+        QueryMsg::GetCount {} => to_binary(&query_count(deps)?),
+    }
+}
+
+fn query_count(deps: Deps) -> StdResult<CountResponse> {
+    let state = STATE.load(deps.storage)?;
+    Ok(CountResponse { count: state.count })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cosmwasm_std::testing::{mock_dependencies, mock_env, mock_info};
+
+    #[test]
+    fn proper_initialization() {
+        let mut deps = mock_dependencies();
+        let msg = InstantiateMsg { count: 5 };
+        let info = mock_info("creator", &[]);
+        let res = instantiate(deps.as_mut(), mock_env(), info.clone(), msg).unwrap();
+        assert_eq!(res.attributes[0].value, "instantiate");
+
+        let state = STATE.load(&deps.storage).unwrap();
+        assert_eq!(state.count, 5);
+        assert_eq!(state.owner.to_string(), "creator");
+    }
+
+    #[test]
+    fn increment_works() {
+        let mut deps = mock_dependencies();
+        let init = InstantiateMsg { count: 0 };
+        let info = mock_info("creator", &[]);
+        instantiate(deps.as_mut(), mock_env(), info.clone(), init).unwrap();
+
+        let info = mock_info("anyone", &[]);
+        execute(deps.as_mut(), mock_env(), info, ExecuteMsg::Increment {}).unwrap();
+
+        let res = query(deps.as_ref(), mock_env(), QueryMsg::GetCount {}).unwrap();
+        let resp: CountResponse = serde_json_wasm::from_slice(&res).unwrap();
+        assert_eq!(resp.count, 1);
+    }
+
+    #[test]
+    fn reset_requires_owner() {
+        let mut deps = mock_dependencies();
+        let init = InstantiateMsg { count: 7 };
+        let info = mock_info("owner", &[]);
+        instantiate(deps.as_mut(), mock_env(), info.clone(), init).unwrap();
+
+        // unauthorized reset
+        let info = mock_info("bad_guy", &[]);
+        let err = execute(deps.as_mut(), mock_env(), info, ExecuteMsg::Reset { count: 0 })
+            .unwrap_err();
+        assert!(err.to_string().contains("unauthorized"));
+
+        // authorized reset
+        let info = mock_info("owner", &[]);
+        let _res = execute(deps.as_mut(), mock_env(), info, ExecuteMsg::Reset { count: 42 }).unwrap();
+        let res = query(deps.as_ref(), mock_env(), QueryMsg::GetCount {}).unwrap();
+        let resp: CountResponse = serde_json_wasm::from_slice(&res).unwrap();
+        assert_eq!(resp.count, 42);
+    }
+}
